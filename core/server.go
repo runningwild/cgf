@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/gob"
 	"errors"
+	"log"
 	"net"
 	"time"
 )
@@ -34,9 +35,11 @@ type Server struct {
 	remote_bundles chan EventBundle
 
 	// Client stuff
+	Events           chan Event
 	Complete_bundles chan CompleteBundle
 	State_request    chan struct{}
 	State_response   chan Game
+	Logger           *log.Logger
 	Errs             chan error
 }
 
@@ -47,10 +50,13 @@ type wireData struct {
 	CompleteBundle *CompleteBundle
 }
 
-func MakeServer(game Game, listener net.Listener) (*Server, error) {
+func MakeServer(game Game, frame_ms int, logger *log.Logger, listener net.Listener) (*Server, error) {
 	var s Server
+	s.Logger = logger
 	s.game = game
-	s.Ticker = time.Tick(time.Millisecond)
+	s.Ticker = time.Tick(time.Millisecond * time.Duration(frame_ms))
+	s.Events = make(chan Event, 100)
+	s.remote_bundles = make(chan EventBundle, 100)
 	s.Complete_bundles = make(chan CompleteBundle, 10)
 	s.State_request = make(chan struct{})
 	s.State_response = make(chan Game)
@@ -80,7 +86,8 @@ func MakeCilent(data []byte, conn net.Conn) (*Server, error) {
 
 	var s Server
 	s.game = resp.Game
-	s.remote_bundles = make(chan EventBundle, 10)
+	s.remote_bundles = make(chan EventBundle, 100)
+	s.Events = make(chan Event, 100)
 	s.Complete_bundles = make(chan CompleteBundle, 10)
 	s.State_request = make(chan struct{})
 	s.State_response = make(chan Game)
@@ -116,14 +123,14 @@ func (s *Server) clientReadRoutine(conn net.Conn, dec *gob.Decoder) {
 
 func (s *Server) routine() {
 	external_game := s.game.Copy().(Game)
-
-	var time_ms int64
-	frame_time := int64(25)
 	frame_events := make(map[EngineId][]Event)
 
 	for {
 		select {
 		// These cases are for all clients
+		case event := <-s.Events:
+			s.remote_bundles <- EventBundle{0, []Event{event}}
+
 		case bundles := <-s.Complete_bundles:
 			for _, event := range bundles.Events {
 				event.Apply(s.game)
@@ -136,22 +143,19 @@ func (s *Server) routine() {
 
 		case err := <-s.Errs:
 			// TODO: Better error handling
-			println(err)
 			panic(err)
 
 		// These cases are for servers only
 		case <-s.Ticker:
-			time_ms++
 			var complete_bundle CompleteBundle
-			if time_ms%frame_time == 0 {
-				for _, events := range frame_events {
-					for _, event := range events {
-						complete_bundle.Events = append(complete_bundle.Events, event)
-					}
+			for _, events := range frame_events {
+				for _, event := range events {
+					complete_bundle.Events = append(complete_bundle.Events, event)
 				}
-				s.Complete_bundles <- complete_bundle
-				// TODO: Also send complete bundle to all connected clients
 			}
+			s.Complete_bundles <- complete_bundle
+			frame_events = make(map[EngineId][]Event)
+			// TODO: Also send complete bundle to all connected clients
 
 		case bundle := <-s.remote_bundles:
 			events := frame_events[bundle.EngineId]
@@ -161,6 +165,10 @@ func (s *Server) routine() {
 			frame_events[bundle.EngineId] = events
 		}
 	}
+}
+
+func (s *Server) ApplyEvent(event Event) {
+	s.Events <- event
 }
 
 func (s *Server) CurrentState() Game {

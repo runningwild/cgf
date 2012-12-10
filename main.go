@@ -1,9 +1,8 @@
-package main
+package cgf
 
 import (
-	"fmt"
 	"github.com/runningwild/cgf/core"
-	"time"
+	"log"
 )
 
 type Game interface {
@@ -14,32 +13,22 @@ type Event interface {
 	core.Event
 }
 
-type FooGame struct {
-	A, B int
+type Engine struct {
+	server *core.Server
 }
 
-func (f *FooGame) Think() {
-	f.A++
-	f.B += 2
-}
-func (f *FooGame) Copy() interface{} {
-	f2 := *f
-	return &f2
-}
-func (f *FooGame) OverwriteWith(_f2 interface{}) {
-	*f = *_f2.(*FooGame)
+func (e *Engine) CurrentState() Game {
+	return e.server.CurrentState()
 }
 
-func main() {
-	f := FooGame{}
-	s, err := core.MakeServer(&f, nil)
+func (e *Engine) ApplyEvent(event Event) {
+	e.server.ApplyEvent(event)
+}
+
+func NewLocalEngine(game Game, frame_ms int, logger *log.Logger) (*Engine, error) {
+	server, err := core.MakeServer(game, frame_ms, logger, nil)
 	if err != nil {
-		println(err.Error())
-		return
+		return nil, err
 	}
-	for i := 0; i < 100; i++ {
-		time.Sleep(time.Millisecond * 10)
-		f := s.CurrentState().(*FooGame)
-		fmt.Printf("State: %v\n", f)
-	}
+	return &Engine{server}, nil
 }

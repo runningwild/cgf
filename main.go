@@ -25,6 +25,10 @@ func (e *Engine) ApplyEvent(event Event) {
 	e.server.ApplyEvent(event)
 }
 
+func NewHostEngine(game Game, frame_ms int, logger *log.Logger) (*Engine, error) {
+	return nil, nil
+}
+
 func NewLocalEngine(game Game, frame_ms int, logger *log.Logger) (*Engine, error) {
 	server, err := core.MakeServer(game, frame_ms, logger, nil)
 	if err != nil {

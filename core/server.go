@@ -26,8 +26,11 @@ type Server struct {
 	// Events received from client engines.
 	Remote_events chan Event
 
-	// Completed bundles are sent along here and then sent to each client as well
-	// as the server-side client.
+	// Completed bundles are sent along Buffer_complete_bundle and then sent along
+	// Broadcast_complete_bundles to be broadcast to all client machines.  In
+	// between they are buffered so that any number of CompleteBundles can be sent
+	// without blocking.
+	Buffer_complete_bundles    chan CompleteBundle
 	Broadcast_complete_bundles chan CompleteBundle
 
 	// When the server picks up new connections they are sent along this channel.
@@ -75,32 +78,58 @@ func (wd *wireData) GetErr() error {
 	return nil
 }
 
-func MakeServer(game Game, frame_ms int, logger *log.Logger, listener net.Listener) (*Server, error) {
-	var s Server
-	s.Logger = logger
-	s.game = game
-	s.Ticker = time.Tick(time.Millisecond * time.Duration(frame_ms))
-	s.New_conns = make(chan net.Conn, 10)
-	s.Broadcast_complete_bundles = make(chan CompleteBundle, 10)
-	s.Remote_events = make(chan Event, 100)
+func (s *Server) initCommonChans() {
 	s.Complete_bundles = make(chan CompleteBundle, 10)
 	s.State_request = make(chan struct{})
 	s.State_response = make(chan Game)
 	s.Errs = make(chan error, 100)
+}
+
+func (s *Server) initServerChans(frame_ms int) {
+	s.Ticker = time.Tick(time.Millisecond * time.Duration(frame_ms))
+	s.New_conns = make(chan net.Conn, 10)
+	s.Buffer_complete_bundles = make(chan CompleteBundle)
+	s.Broadcast_complete_bundles = make(chan CompleteBundle)
+	s.Remote_events = make(chan Event, 100)
+}
+
+func (s *Server) initClientChans(frame_ms int) {
+	s.Events = make(chan Event, 10)
+}
+
+func MakeServer(game Game, frame_ms int, logger *log.Logger, listener net.Listener) (*Server, error) {
+	var s Server
+	s.Logger = logger
+	s.game = game
+	s.initCommonChans()
+	s.initServerChans(frame_ms)
+	go s.infiniteBufferRoutine()
+	if listener != nil {
+		s.New_conns = make(chan net.Conn)
+		go s.listenerRoutine(listener)
+	}
 	go s.broadcastCompletedBundlesRoutine()
 	go s.routine()
 	return &s, nil
 }
 
-func MakeCilent(data []byte, conn net.Conn) (*Server, error) {
+func (s *Server) listenerRoutine(listener net.Listener) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			panic(err)
+			s.Errs <- err
+			return
+		}
+		s.New_conns <- conn
+	}
+}
+
+func MakeClient(frame_ms int, logger *log.Logger, conn net.Conn) (*Server, error) {
 	enc := gob.NewEncoder(conn)
 	dec := gob.NewDecoder(conn)
-	err := enc.Encode(data)
-	if err != nil {
-		return nil, err
-	}
 	var resp wireData
-	err = dec.Decode(&resp)
+	err := dec.Decode(&resp)
 	if err != nil {
 		return nil, err
 	}
@@ -113,17 +142,43 @@ func MakeCilent(data []byte, conn net.Conn) (*Server, error) {
 	}
 
 	var s Server
+	s.Logger = logger
 	s.game = resp.Game
-	s.Events = make(chan Event, 100)
-	s.Complete_bundles = make(chan CompleteBundle, 10)
-	s.State_request = make(chan struct{})
-	s.State_response = make(chan Game)
-	s.Errs = make(chan error)
+	s.initCommonChans()
+	s.initClientChans(frame_ms)
 	go s.clientReadRoutine(dec)
 	go s.clientWriteRoutine(enc)
 	go s.routine()
 
 	return &s, nil
+}
+
+// TODO: should probably kill this off when the engine gets killed off
+// Effectively creates an infinitely buffered channel from
+// s.Buffer_complete_bundles to s.Broadcast_complete_bundles.
+func (s *Server) infiniteBufferRoutine() {
+	var bundles []CompleteBundle
+	var out chan CompleteBundle
+	var dummy_bundle CompleteBundle
+	current_bundle := &dummy_bundle
+	for {
+		select {
+		case out <- *current_bundle:
+			bundles = bundles[1:]
+			if len(bundles) > 0 {
+				current_bundle = &bundles[0]
+			} else {
+				out = nil
+			}
+
+		case bundle := <-s.Buffer_complete_bundles:
+			bundles = append(bundles, bundle)
+			if len(bundles) == 1 {
+				out = s.Broadcast_complete_bundles
+				current_bundle = &bundles[0]
+			}
+		}
+	}
 }
 
 // If you're looking for a serverWriteRoutine(), this is basically it.
@@ -136,21 +191,30 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 		// ourselves.
 		case bundle := <-s.Broadcast_complete_bundles:
 			for _, client := range clients {
-				err := client.Encode(bundle)
+				err := client.Encode(wireData{CompleteBundle: &bundle})
 				if err != nil {
+					panic(err)
 					s.Errs <- err
-					if s.Logger != nil {
-						s.Logger.Printf("Error on encoding, probably should deal with this for realzs.")
-					}
 				}
 			}
-			s.Logger.Printf("Sending complete bundle")
+			// This send is on an unbuffered channel, so if we request the game state
+			// after this send completes we will get the most up-to-date state
+			// possible.
 			s.Complete_bundles <- bundle
-			s.Logger.Printf("Send complete bundle")
 
+		// If we get a new connection we first send them the current game state,
+		// then we add them to our list of open connections and launch a routine to
+		// handle events they send to us.
 		case conn := <-s.New_conns:
-			clients = append(clients, gob.NewEncoder(conn))
-			go s.serverReadRoutine(gob.NewDecoder(conn))
+			enc := gob.NewEncoder(conn)
+			err := enc.Encode(wireData{Game: s.CurrentState()})
+			if err != nil {
+				panic(err)
+				s.Errs <- err
+			} else {
+				clients = append(clients, enc)
+				go s.serverReadRoutine(gob.NewDecoder(conn))
+			}
 		}
 	}
 }
@@ -162,6 +226,7 @@ func (s *Server) serverReadRoutine(dec *gob.Decoder) {
 		var data wireData
 		err := dec.Decode(&data)
 		if err != nil {
+			panic(err)
 			s.Errs <- err
 			return
 		}
@@ -181,6 +246,7 @@ func (s *Server) clientReadRoutine(dec *gob.Decoder) {
 		var data wireData
 		err := dec.Decode(&data)
 		if err != nil {
+			panic(err)
 			s.Errs <- err
 			return
 		}
@@ -204,6 +270,7 @@ func (s *Server) clientWriteRoutine(enc *gob.Encoder) {
 		data.Event = event
 		err := enc.Encode(data)
 		if err != nil {
+			panic(err)
 			s.Errs <- err
 			return
 		}
@@ -217,30 +284,40 @@ func (s *Server) routine() {
 		select {
 		// These cases are for all clients
 		case bundles := <-s.Complete_bundles:
-			s.Logger.Printf("Complete bundle")
+			if s.Logger != nil {
+				s.Logger.Printf("Complete_bundles")
+			}
 			for _, event := range bundles.Events {
 				event.Apply(s.game)
 			}
 			s.game.Think()
+			external_game.OverwriteWith(s.game)
 
 		case <-s.State_request:
-			s.Logger.Printf("State req")
-			external_game.OverwriteWith(s.game)
+			if s.Logger != nil {
+				s.Logger.Printf("State_request")
+			}
 			s.State_response <- external_game
 
 		case err := <-s.Errs:
-			s.Logger.Printf("Err: %v", err)
+			if s.Logger != nil {
+				s.Logger.Printf("Errs")
+			}
 			// TODO: Better error handling
 			panic(err)
 
 		// These cases are for servers only
 		case <-s.Ticker:
-			s.Logger.Printf("Tick")
-			s.Broadcast_complete_bundles <- *complete_bundle
+			if s.Logger != nil {
+				s.Logger.Printf("Ticker")
+			}
+			s.Buffer_complete_bundles <- *complete_bundle
 			complete_bundle = new(CompleteBundle)
 
 		case event := <-s.Remote_events:
-			s.Logger.Printf("Event")
+			if s.Logger != nil {
+				s.Logger.Printf("Remote_events")
+			}
 			complete_bundle.Events = append(complete_bundle.Events, event)
 		}
 	}

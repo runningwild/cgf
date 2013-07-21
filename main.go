@@ -39,6 +39,19 @@ func (e *Engine) Unpause() {
 	e.server.Pause.Unlock()
 }
 
+// Returns the Id of this engine.  Every engine connected in a game has a unique
+// id.
+func (e *Engine) Id() int64 {
+	return e.server.Id()
+}
+
+// If this is the Host engine this function will return a list of the ids of all
+// engines currently connected, including this engine.  If this is a client
+// engine this function will return nil.
+func (e *Engine) Ids() []int64 {
+	return e.server.Ids()
+}
+
 func NewHostEngine(game Game, frame_ms int, ip string, port int, logger *log.Logger) (*Engine, error) {
 	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", ip, port))
 	if err != nil {

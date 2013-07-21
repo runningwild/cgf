@@ -21,7 +21,10 @@ type CompleteBundle struct {
 }
 
 type Server struct {
-	Pause sync.Mutex
+	id     EngineId
+	ids    map[net.Conn]EngineId // Only used on the server
+	nextId EngineId
+	Pause  sync.Mutex
 
 	// Ticks ever ms
 	Ticker <-chan time.Time
@@ -51,14 +54,21 @@ type Server struct {
 	Update_response  chan struct{}
 	Copy_request     chan struct{}
 	Copy_response    chan Game
+	Ids_request      chan struct{}
+	Ids_response     chan []int64
 	Logger           *log.Logger
 	Errs             chan error
+}
+
+type setupData struct {
+	Game Game
+	Id   EngineId
 }
 
 // Exactly one of the values should be non-nil
 type wireData struct {
 	Err            []byte
-	Game           Game
+	Setup          *setupData
 	Event          Event
 	CompleteBundle *CompleteBundle
 }
@@ -68,7 +78,7 @@ func (wd *wireData) GetErr() error {
 		return errors.New(string(wd.Err))
 	}
 	count := 0
-	if wd.Game != nil {
+	if wd.Setup != nil {
 		count++
 	}
 	if wd.Event != nil {
@@ -89,10 +99,14 @@ func (s *Server) initCommonChans() {
 	s.Update_response = make(chan struct{})
 	s.Copy_request = make(chan struct{})
 	s.Copy_response = make(chan Game)
+	s.Ids_request = make(chan struct{})
+	s.Ids_response = make(chan []int64)
 	s.Errs = make(chan error, 100)
 }
 
 func (s *Server) initServerChans(frame_ms int) {
+	s.ids = make(map[net.Conn]EngineId)
+	s.ids[nil] = 0
 	s.Ticker = time.Tick(time.Millisecond * time.Duration(frame_ms))
 	s.New_conns = make(chan net.Conn, 10)
 	s.Buffer_complete_bundles = make(chan CompleteBundle)
@@ -144,13 +158,14 @@ func MakeClient(frame_ms int, logger *log.Logger, conn net.Conn) (*Server, error
 	if err != nil {
 		return nil, err
 	}
-	if resp.Game == nil {
-		return nil, errors.New("Server failed to send game state.")
+	if resp.Setup == nil || resp.Setup.Game == nil {
+		return nil, errors.New("Server failed to send initial data.")
 	}
 
 	var s Server
 	s.Logger = logger
-	s.game = resp.Game
+	s.game = resp.Setup.Game
+	s.id = resp.Setup.Id
 	s.initCommonChans()
 	s.initClientChans(frame_ms)
 	go s.clientReadRoutine(dec)
@@ -200,6 +215,10 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 			for _, client := range clients {
 				err := client.Encode(wireData{CompleteBundle: &bundle})
 				if err != nil {
+					// TODO: If a client disconnects they should be removed from s.ids
+					if s.Logger != nil {
+						s.Logger.Printf("Error broadcasting: %v", err)
+					}
 					panic(err)
 					s.Errs <- err
 				}
@@ -214,13 +233,24 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 		// handle events they send to us.
 		case conn := <-s.New_conns:
 			enc := gob.NewEncoder(conn)
-			err := enc.Encode(wireData{Game: s.CopyState()})
+			if s.Logger != nil {
+				s.Logger.Printf("encoding")
+			}
+			id := s.nextId
+			s.nextId++
+			err := enc.Encode(wireData{Setup: &setupData{Game: s.CopyState(), Id: id}})
+			if s.Logger != nil {
+				s.Logger.Printf("%v", err)
+			}
 			if err != nil {
-				panic(err)
+				if s.Logger != nil {
+					s.Logger.Printf("Error connecting new client: %v", err)
+				}
 				s.Errs <- err
 			} else {
 				clients = append(clients, enc)
 				go s.serverReadRoutine(gob.NewDecoder(conn))
+				s.ids[conn] = id
 			}
 		}
 	}
@@ -233,6 +263,7 @@ func (s *Server) serverReadRoutine(dec *gob.Decoder) {
 		var data wireData
 		err := dec.Decode(&data)
 		if err != nil {
+			// TODO: drop the client?
 			panic(err)
 			s.Errs <- err
 			return
@@ -265,7 +296,7 @@ func (s *Server) clientReadRoutine(dec *gob.Decoder) {
 		case data.CompleteBundle != nil:
 			s.Complete_bundles <- *data.CompleteBundle
 
-		case data.Game != nil:
+		case data.Setup != nil:
 			// Rawr?
 		}
 	}
@@ -304,6 +335,16 @@ func (s *Server) routine() {
 		case <-s.Copy_request:
 			s.Copy_response <- s.game.Copy().(Game)
 
+		case <-s.Ids_request:
+			if s.ids == nil {
+				s.Ids_response <- nil
+			}
+			var ids []int64
+			for _, id := range s.ids {
+				ids = append(ids, int64(id))
+			}
+			s.Ids_response <- ids
+
 		case err := <-s.Errs:
 			if s.Logger != nil {
 				s.Logger.Printf("Errs")
@@ -313,19 +354,22 @@ func (s *Server) routine() {
 
 		// These cases are for servers only
 		case <-s.Ticker:
-			if s.Logger != nil {
-				s.Logger.Printf("Ticker")
-			}
 			s.Buffer_complete_bundles <- *complete_bundle
 			complete_bundle = new(CompleteBundle)
 
 		case event := <-s.Remote_events:
-			if s.Logger != nil {
-				s.Logger.Printf("Remote_events")
-			}
 			complete_bundle.Events = append(complete_bundle.Events, event)
 		}
 	}
+}
+
+func (s *Server) Id() int64 {
+	return int64(s.id)
+}
+
+func (s *Server) Ids() []int64 {
+	s.Ids_request <- struct{}{}
+	return <-s.Ids_response
 }
 
 func (s *Server) ApplyEvent(event Event) {

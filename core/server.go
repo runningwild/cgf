@@ -60,7 +60,7 @@ type Server struct {
 	Errs             chan error
 }
 
-type setupData struct {
+type SetupData struct {
 	Game Game
 	Id   EngineId
 }
@@ -68,7 +68,7 @@ type setupData struct {
 // Exactly one of the values should be non-nil
 type wireData struct {
 	Err            []byte
-	Setup          *setupData
+	Setup          *SetupData
 	Event          Event
 	CompleteBundle *CompleteBundle
 }
@@ -106,7 +106,9 @@ func (s *Server) initCommonChans() {
 
 func (s *Server) initServerChans(frame_ms int) {
 	s.ids = make(map[net.Conn]EngineId)
-	s.ids[nil] = 0
+	s.id = 1
+	s.ids[nil] = 1
+	s.nextId = 2
 	s.Ticker = time.Tick(time.Millisecond * time.Duration(frame_ms))
 	s.New_conns = make(chan net.Conn, 10)
 	s.Buffer_complete_bundles = make(chan CompleteBundle)
@@ -238,7 +240,7 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 			}
 			id := s.nextId
 			s.nextId++
-			err := enc.Encode(wireData{Setup: &setupData{Game: s.CopyState(), Id: id}})
+			err := enc.Encode(wireData{Setup: &SetupData{Game: s.CopyState(), Id: id}})
 			if s.Logger != nil {
 				s.Logger.Printf("%v", err)
 			}
@@ -252,6 +254,12 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 				go s.serverReadRoutine(gob.NewDecoder(conn))
 				s.ids[conn] = id
 			}
+		case <-s.Ids_request:
+			var ids []int64
+			for _, id := range s.ids {
+				ids = append(ids, int64(id))
+			}
+			s.Ids_response <- ids
 		}
 	}
 }
@@ -335,16 +343,6 @@ func (s *Server) routine() {
 		case <-s.Copy_request:
 			s.Copy_response <- s.game.Copy().(Game)
 
-		case <-s.Ids_request:
-			if s.ids == nil {
-				s.Ids_response <- nil
-			}
-			var ids []int64
-			for _, id := range s.ids {
-				ids = append(ids, int64(id))
-			}
-			s.Ids_response <- ids
-
 		case err := <-s.Errs:
 			if s.Logger != nil {
 				s.Logger.Printf("Errs")
@@ -368,6 +366,9 @@ func (s *Server) Id() int64 {
 }
 
 func (s *Server) Ids() []int64 {
+	if s.id != 1 {
+		return nil
+	}
 	s.Ids_request <- struct{}{}
 	return <-s.Ids_response
 }

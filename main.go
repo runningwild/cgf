@@ -52,6 +52,10 @@ func (e *Engine) Ids() []int64 {
 	return e.server.Ids()
 }
 
+func (e *Engine) Kill() {
+	e.server.Kill()
+}
+
 func NewHostEngine(game Game, frame_ms int, ip string, port int, logger *log.Logger) (*Engine, error) {
 	listener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", ip, port))
 	if err != nil {

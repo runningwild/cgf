@@ -42,10 +42,17 @@ type Server struct {
 	// When the server picks up new connections they are sent along this channel.
 	New_conns chan net.Conn
 
+	// Used to terminate the engine and all associated routines
+	Die chan struct{}
+
 	// Current game state.
 	game Game
 
 	conns []net.Conn
+
+	// Need to keep this around so that it can be closed if the engine is killed.
+	listener net.Listener
+	conn     net.Conn
 
 	// Client stuff
 	Events           chan Event
@@ -101,6 +108,7 @@ func (s *Server) initCommonChans() {
 	s.Copy_response = make(chan Game)
 	s.Ids_request = make(chan struct{})
 	s.Ids_response = make(chan []int64)
+	s.Die = make(chan struct{})
 	s.Errs = make(chan error, 100)
 }
 
@@ -127,9 +135,10 @@ func MakeServer(game Game, frame_ms int, logger *log.Logger, listener net.Listen
 	s.initCommonChans()
 	s.initServerChans(frame_ms)
 	go s.infiniteBufferRoutine()
-	if listener != nil {
+	s.listener = listener
+	if s.listener != nil {
 		s.New_conns = make(chan net.Conn)
-		go s.listenerRoutine(listener)
+		go s.listenerRoutine(s.listener)
 	}
 	go s.broadcastCompletedBundlesRoutine()
 	go s.routine()
@@ -140,7 +149,9 @@ func (s *Server) listenerRoutine(listener net.Listener) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			panic(err)
+			if s.Logger != nil {
+				s.Logger.Printf("Error while listening: %v", err)
+			}
 			s.Errs <- err
 			return
 		}
@@ -165,6 +176,7 @@ func MakeClient(frame_ms int, logger *log.Logger, conn net.Conn) (*Server, error
 	}
 
 	var s Server
+	s.conn = conn
 	s.Logger = logger
 	s.game = resp.Setup.Game
 	s.id = resp.Setup.Id
@@ -201,6 +213,9 @@ func (s *Server) infiniteBufferRoutine() {
 				out = s.Broadcast_complete_bundles
 				current_bundle = &bundles[0]
 			}
+
+		case <-s.Die:
+			return
 		}
 	}
 }
@@ -254,12 +269,16 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 				go s.serverReadRoutine(gob.NewDecoder(conn))
 				s.ids[conn] = id
 			}
+
 		case <-s.Ids_request:
 			var ids []int64
 			for _, id := range s.ids {
 				ids = append(ids, int64(id))
 			}
 			s.Ids_response <- ids
+
+		case <-s.Die:
+			return
 		}
 	}
 }
@@ -316,7 +335,6 @@ func (s *Server) clientWriteRoutine(enc *gob.Encoder) {
 		data.Event = event
 		err := enc.Encode(data)
 		if err != nil {
-			panic(err)
 			s.Errs <- err
 			return
 		}
@@ -357,6 +375,9 @@ func (s *Server) routine() {
 
 		case event := <-s.Remote_events:
 			complete_bundle.Events = append(complete_bundle.Events, event)
+
+		case <-s.Die:
+			return
 		}
 	}
 }
@@ -390,4 +411,33 @@ func (s *Server) UpdateState(game Game) {
 func (s *Server) CopyState() Game {
 	s.Copy_request <- struct{}{}
 	return <-s.Copy_response
+}
+
+func (s *Server) Kill() {
+	// close(s.Events)     // This shuts down clientWriteRoutine
+	// s.Die <- struct{}{} // One will kill off Server.routine()
+	if s.id == 1 {
+		// Kill off server routines
+		if s.listener != nil {
+			// Start off by killing the listener so we can't get any more new
+			// connections.
+			s.listener.Close()
+		}
+		s.Die <- struct{}{} // One for Server.infiniteBufferRoutine()
+		s.Die <- struct{}{} // One for Server.broadcastCompletedBundlesRoutine()
+		s.Die <- struct{}{} // One for Server.routine()
+
+		// Also need to close all individual connections.
+		for _, conn := range s.conns {
+			conn.Close()
+		}
+	} else {
+		// Start by killing the host connection so that nothing new can show up.
+		// This will kill off Server.clientReadRoutine()
+		s.conn.Close()
+
+		// Kill off Server.clientWriteRoutine()
+		close(s.Events)
+		s.Die <- struct{}{} // Server.routine()
+	}
 }

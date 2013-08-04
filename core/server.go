@@ -15,7 +15,7 @@ type CompleteBundle struct {
 	// All of the events for the frame, in the order that they should be applied
 	Events []Event
 
-	// Optional hash of the game state.  If not nil the client will hash the game
+	// Optional hash of the Game state.  If not nil the client will hash the Game
 	// state and let the server know if it needs to be resynced.
 	Hash []byte
 }
@@ -45,8 +45,8 @@ type Server struct {
 	// Used to terminate the engine and all associated routines
 	Die chan struct{}
 
-	// Current game state.
-	game Game
+	// Current Game state.
+	Game Game
 
 	conns []net.Conn
 
@@ -57,10 +57,6 @@ type Server struct {
 	// Client stuff
 	Events           chan Event
 	Complete_bundles chan CompleteBundle
-	Update_request   chan Game
-	Update_response  chan struct{}
-	Copy_request     chan struct{}
-	Copy_response    chan Game
 	Ids_request      chan struct{}
 	Ids_response     chan []int64
 	Logger           *log.Logger
@@ -102,10 +98,6 @@ func (wd *wireData) GetErr() error {
 
 func (s *Server) initCommonChans() {
 	s.Complete_bundles = make(chan CompleteBundle, 10)
-	s.Update_request = make(chan Game)
-	s.Update_response = make(chan struct{})
-	s.Copy_request = make(chan struct{})
-	s.Copy_response = make(chan Game)
 	s.Ids_request = make(chan struct{})
 	s.Ids_response = make(chan []int64)
 	s.Die = make(chan struct{})
@@ -128,10 +120,10 @@ func (s *Server) initClientChans(frame_ms int) {
 	s.Events = make(chan Event, 10)
 }
 
-func MakeServer(game Game, frame_ms int, logger *log.Logger, listener net.Listener) (*Server, error) {
+func MakeServer(Game Game, frame_ms int, logger *log.Logger, listener net.Listener) (*Server, error) {
 	var s Server
 	s.Logger = logger
-	s.game = game
+	s.Game = Game
 	s.initCommonChans()
 	s.initServerChans(frame_ms)
 	go s.infiniteBufferRoutine()
@@ -178,7 +170,7 @@ func MakeClient(frame_ms int, logger *log.Logger, conn net.Conn) (*Server, error
 	var s Server
 	s.conn = conn
 	s.Logger = logger
-	s.game = resp.Setup.Game
+	s.Game = resp.Setup.Game
 	s.id = resp.Setup.Id
 	s.initCommonChans()
 	s.initClientChans(frame_ms)
@@ -240,12 +232,12 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 					s.Errs <- err
 				}
 			}
-			// This send is on an unbuffered channel, so if we request the game state
+			// This send is on an unbuffered channel, so if we request the Game state
 			// after this send completes we will get the most up-to-date state
 			// possible.
 			s.Complete_bundles <- bundle
 
-		// If we get a new connection we first send them the current game state,
+		// If we get a new connection we first send them the current Game state,
 		// then we add them to our list of open connections and launch a routine to
 		// handle events they send to us.
 		case conn := <-s.New_conns:
@@ -255,7 +247,7 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 			}
 			id := s.nextId
 			s.nextId++
-			err := enc.Encode(wireData{Setup: &SetupData{Game: s.CopyState(), Id: id}})
+			err := enc.Encode(wireData{Setup: &SetupData{Game: s.Game, Id: id}})
 			if s.Logger != nil {
 				s.Logger.Printf("%v", err)
 			}
@@ -348,18 +340,11 @@ func (s *Server) routine() {
 		// These cases are for all clients
 		case bundles := <-s.Complete_bundles:
 			for _, event := range bundles.Events {
-				event.Apply(s.game)
+				event.Apply(s.Game)
 			}
 			s.Pause.Lock()
-			s.game.Think()
+			s.Game.Think()
 			s.Pause.Unlock()
-
-		case game := <-s.Update_request:
-			game.OverwriteWith(s.game)
-			s.Update_response <- struct{}{}
-
-		case <-s.Copy_request:
-			s.Copy_response <- s.game.Copy().(Game)
 
 		case err := <-s.Errs:
 			if s.Logger != nil {
@@ -401,16 +386,6 @@ func (s *Server) ApplyEvent(event Event) {
 	case s.Remote_events <- event:
 	case s.Events <- event:
 	}
-}
-
-func (s *Server) UpdateState(game Game) {
-	s.Update_request <- game
-	<-s.Update_response
-}
-
-func (s *Server) CopyState() Game {
-	s.Copy_request <- struct{}{}
-	return <-s.Copy_response
 }
 
 func (s *Server) Kill() {

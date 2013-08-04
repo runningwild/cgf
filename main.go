@@ -19,14 +19,6 @@ type Engine struct {
 	server *core.Server
 }
 
-func (e *Engine) UpdateState(game Game) {
-	e.server.UpdateState(game)
-}
-
-func (e *Engine) CopyState() Game {
-	return e.server.CopyState()
-}
-
 func (e *Engine) ApplyEvent(event Event) {
 	e.server.ApplyEvent(event)
 }
@@ -37,6 +29,10 @@ func (e *Engine) Pause() {
 
 func (e *Engine) Unpause() {
 	e.server.Pause.Unlock()
+}
+
+func (e *Engine) GetState() Game {
+	return e.server.Game
 }
 
 // Returns the Id of this engine.  Every engine connected in a game has a unique

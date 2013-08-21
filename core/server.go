@@ -43,7 +43,9 @@ type Server struct {
 	New_conns chan net.Conn
 
 	// Used to terminate the engine and all associated routines
-	Die chan struct{}
+	KillRoutine        chan struct{}
+	KillInfiniteBuffer chan struct{}
+	KillBroadcast      chan struct{}
 
 	// Current Game state.
 	Game Game
@@ -100,7 +102,7 @@ func (s *Server) initCommonChans() {
 	s.Complete_bundles = make(chan CompleteBundle, 10)
 	s.Ids_request = make(chan struct{})
 	s.Ids_response = make(chan []int64)
-	s.Die = make(chan struct{})
+	s.KillRoutine = make(chan struct{})
 	s.Errs = make(chan error, 100)
 }
 
@@ -114,6 +116,8 @@ func (s *Server) initServerChans(frame_ms int) {
 	s.Buffer_complete_bundles = make(chan CompleteBundle)
 	s.Broadcast_complete_bundles = make(chan CompleteBundle)
 	s.Remote_events = make(chan Event, 100)
+	s.KillInfiniteBuffer = make(chan struct{})
+	s.KillBroadcast = make(chan struct{})
 }
 
 func (s *Server) initClientChans(frame_ms int) {
@@ -206,7 +210,7 @@ func (s *Server) infiniteBufferRoutine() {
 				current_bundle = &bundles[0]
 			}
 
-		case <-s.Die:
+		case <-s.KillInfiniteBuffer:
 			return
 		}
 	}
@@ -269,7 +273,7 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 			}
 			s.Ids_response <- ids
 
-		case <-s.Die:
+		case <-s.KillBroadcast:
 			return
 		}
 	}
@@ -361,7 +365,7 @@ func (s *Server) routine() {
 		case event := <-s.Remote_events:
 			complete_bundle.Events = append(complete_bundle.Events, event)
 
-		case <-s.Die:
+		case <-s.KillRoutine:
 			return
 		}
 	}
@@ -398,9 +402,14 @@ func (s *Server) Kill() {
 			// connections.
 			s.listener.Close()
 		}
-		s.Die <- struct{}{} // One for Server.infiniteBufferRoutine()
-		s.Die <- struct{}{} // One for Server.broadcastCompletedBundlesRoutine()
-		s.Die <- struct{}{} // One for Server.routine()
+
+		// Data goes from the main routine to the infinite buffer to the broadcast
+		// routine, so we need to kill them in that order otherwise the main routine
+		// might block sending data to the infinite buffer even though it's already
+		// died.
+		s.KillRoutine <- struct{}{}
+		s.KillInfiniteBuffer <- struct{}{}
+		s.KillBroadcast <- struct{}{}
 
 		// Also need to close all individual connections.
 		for _, conn := range s.conns {
@@ -413,6 +422,6 @@ func (s *Server) Kill() {
 
 		// Kill off Server.clientWriteRoutine()
 		close(s.Events)
-		s.Die <- struct{}{} // Server.routine()
+		s.KillRoutine <- struct{}{} // Server.routine()
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -142,6 +143,7 @@ func MakeServer(Game Game, frame_ms int, logger *log.Logger, listener net.Listen
 }
 
 func (s *Server) listenerRoutine(listener net.Listener) {
+	defer s.StackCatcher()
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -185,10 +187,19 @@ func MakeClient(frame_ms int, logger *log.Logger, conn net.Conn) (*Server, error
 	return &s, nil
 }
 
-// TODO: should probably kill this off when the engine gets killed off
+func (s *Server) StackCatcher() {
+	if s.Logger != nil {
+		if r := recover(); r != nil {
+			s.Logger.Printf("Panic: %v", r)
+			s.Logger.Fatalf("Stack:\n%s", debug.Stack())
+		}
+	}
+}
+
 // Effectively creates an infinitely buffered channel from
 // s.Buffer_complete_bundles to s.Broadcast_complete_bundles.
 func (s *Server) infiniteBufferRoutine() {
+	defer s.StackCatcher()
 	var bundles []CompleteBundle
 	var out chan CompleteBundle
 	var dummy_bundle CompleteBundle
@@ -218,6 +229,7 @@ func (s *Server) infiniteBufferRoutine() {
 
 // If you're looking for a serverWriteRoutine(), this is basically it.
 func (s *Server) broadcastCompletedBundlesRoutine() {
+	defer s.StackCatcher()
 	var clients []*gob.Encoder
 	for {
 		select {
@@ -282,6 +294,7 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 // One of these is launched for each client connected to the server.  It reads
 // in events and sends them along the Events channel.
 func (s *Server) serverReadRoutine(dec *gob.Decoder) {
+	defer s.StackCatcher()
 	for {
 		var data wireData
 		err := dec.Decode(&data)
@@ -303,6 +316,7 @@ func (s *Server) serverReadRoutine(dec *gob.Decoder) {
 }
 
 func (s *Server) clientReadRoutine(dec *gob.Decoder) {
+	defer s.StackCatcher()
 	for {
 		var data wireData
 		err := dec.Decode(&data)
@@ -326,6 +340,7 @@ func (s *Server) clientReadRoutine(dec *gob.Decoder) {
 }
 
 func (s *Server) clientWriteRoutine(enc *gob.Encoder) {
+	defer s.StackCatcher()
 	for event := range s.Events {
 		var data wireData
 		data.Event = event
@@ -338,6 +353,7 @@ func (s *Server) clientWriteRoutine(enc *gob.Encoder) {
 }
 
 func (s *Server) routine() {
+	defer s.StackCatcher()
 	complete_bundle := new(CompleteBundle)
 	for {
 		select {

@@ -104,7 +104,6 @@ func (s *Server) initCommonChans() {
 	s.Ids_request = make(chan struct{})
 	s.Ids_response = make(chan []int64)
 	s.KillRoutine = make(chan struct{})
-	s.Errs = make(chan error, 100)
 }
 
 func (s *Server) initServerChans(frame_ms int) {
@@ -150,7 +149,6 @@ func (s *Server) listenerRoutine(listener net.Listener) {
 			if s.Logger != nil {
 				s.Logger.Printf("Error while listening: %v", err)
 			}
-			s.Errs <- err
 			return
 		}
 		s.New_conns <- conn
@@ -230,23 +228,32 @@ func (s *Server) infiniteBufferRoutine() {
 // If you're looking for a serverWriteRoutine(), this is basically it.
 func (s *Server) broadcastCompletedBundlesRoutine() {
 	defer s.StackCatcher()
-	var clients []*gob.Encoder
+
+	// Keep track of the encoder stream and also the connction that it uses so
+	// that we can remove them from s.ids if necessary.
+	clients := make(map[*gob.Encoder]net.Conn)
+
+	// Used so that other routines can send us any encoders that failed so we can
+	// remove those clients.
+	dropped_clients := make(chan *gob.Encoder)
+
 	for {
 		select {
-
 		// When a bundle is completed we'll send it to each client, and then to
 		// ourselves.
 		case bundle := <-s.Broadcast_complete_bundles:
-			for _, client := range clients {
+			var dropped []*gob.Encoder
+			for client := range clients {
 				err := client.Encode(wireData{CompleteBundle: &bundle})
-				if err != nil {
-					// TODO: If a client disconnects they should be removed from s.ids
-					if s.Logger != nil {
-						s.Logger.Printf("Error broadcasting: %v", err)
-					}
-					panic(err)
-					s.Errs <- err
+				if err != nil && s.Logger != nil {
+					s.Logger.Printf("CGF error on broadcast: %v", err)
+					dropped = append(dropped, client)
 				}
+			}
+			for _, enc := range dropped {
+				conn := clients[enc]
+				delete(clients, enc)
+				delete(s.ids, conn)
 			}
 			// This send is on an unbuffered channel, so if we request the Game state
 			// after this send completes we will get the most up-to-date state
@@ -269,14 +276,22 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 			}
 			if err != nil {
 				if s.Logger != nil {
-					s.Logger.Printf("Error connecting new client: %v", err)
+					s.Logger.Printf("CGF Error connecting new client: %v", err)
 				}
-				s.Errs <- err
 			} else {
-				clients = append(clients, enc)
-				go s.serverReadRoutine(gob.NewDecoder(conn))
+				clients[enc] = conn
 				s.ids[conn] = id
+				go s.serverReadRoutine(
+					gob.NewDecoder(conn),
+					func() {
+						dropped_clients <- enc
+					})
 			}
+
+		case enc := <-dropped_clients:
+			conn := clients[enc]
+			delete(clients, enc)
+			delete(s.ids, conn)
 
 		case <-s.Ids_request:
 			var ids []int64
@@ -293,20 +308,25 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 
 // One of these is launched for each client connected to the server.  It reads
 // in events and sends them along the Events channel.
-func (s *Server) serverReadRoutine(dec *gob.Decoder) {
+// cleanup() is a function that should properly remove all information about the
+// remove engine from the local engine.
+func (s *Server) serverReadRoutine(dec *gob.Decoder, cleanup func()) {
 	defer s.StackCatcher()
 	for {
 		var data wireData
 		err := dec.Decode(&data)
 		if err != nil {
-			// TODO: drop the client?
-			panic(err)
-			s.Errs <- err
+			if s.Logger != nil {
+				s.Logger.Printf("CGF error reading from client: %v", err)
+			}
+			cleanup()
 			return
 		}
 		switch {
 		case data.GetErr() != nil:
-			s.Errs <- data.GetErr()
+			if s.Logger != nil {
+				s.Logger.Printf("CGF error from client: %v", data.GetErr())
+			}
 			return
 
 		case data.Event != nil:
@@ -321,13 +341,17 @@ func (s *Server) clientReadRoutine(dec *gob.Decoder) {
 		var data wireData
 		err := dec.Decode(&data)
 		if err != nil {
+			if s.Logger != nil {
+				s.Logger.Printf("CGF client read error: %v", err)
+			}
 			panic(err)
-			s.Errs <- err
 			return
 		}
 		switch {
 		case data.GetErr() != nil:
-			s.Errs <- data.GetErr()
+			if s.Logger != nil {
+				s.Logger.Printf("CGF error from server: %v", data.GetErr())
+			}
 			return
 
 		case data.CompleteBundle != nil:
@@ -346,7 +370,9 @@ func (s *Server) clientWriteRoutine(enc *gob.Encoder) {
 		data.Event = event
 		err := enc.Encode(data)
 		if err != nil {
-			s.Errs <- err
+			if s.Logger != nil {
+				s.Logger.Printf("CGF error writing to client: %v", err)
+			}
 			return
 		}
 	}
@@ -365,13 +391,6 @@ func (s *Server) routine() {
 			s.Pause.Lock()
 			s.Game.Think()
 			s.Pause.Unlock()
-
-		case err := <-s.Errs:
-			if s.Logger != nil {
-				s.Logger.Printf("Errs")
-			}
-			// TODO: Better error handling
-			panic(err)
 
 		// These cases are for servers only
 		case <-s.Ticker:

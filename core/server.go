@@ -385,10 +385,10 @@ func (s *Server) routine() {
 		select {
 		// These cases are for all clients
 		case bundles := <-s.Complete_bundles:
+			s.Pause.Lock()
 			for _, event := range bundles.Events {
 				event.Apply(s.Game)
 			}
-			s.Pause.Lock()
 			s.Game.Think()
 			s.Pause.Unlock()
 

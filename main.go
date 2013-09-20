@@ -74,14 +74,18 @@ func Host(port int, name string) error {
 	go func() {
 		for {
 			msg := make([]byte, 1024)
-			_, remoteAddr, err := listen.ReadFromUDP(msg)
+			n, remoteAddr, err := listen.ReadFromUDP(msg)
 			if err != nil {
 				return
 			}
-
+			var returnPort int
+			_, err = fmt.Sscanf(string(msg[0:n]), "ping:%d", &returnPort)
+			if err != nil {
+				continue
+			}
 			// Take the ping we got and send back a pong so they know we're here
 			go func() {
-				conn, err := net.Dial("udp", remoteAddr.String())
+				conn, err := net.Dial("udp", fmt.Sprintf("%s:%d", remoteAddr.IP.String(), returnPort))
 				if err != nil {
 					return
 				}
@@ -98,10 +102,10 @@ func Host(port int, name string) error {
 
 // This will broadcast on LAN, wait for waitMS milliseconds, and return data for
 // each host on the LAN
-func SearchLANForHosts(port int, waitMs int) ([]HostData, error) {
+func SearchLANForHosts(brodacastPort, listenPort int, waitMs int) ([]HostData, error) {
 	// We set up the listener before pinging because we don't want someone to
 	// respond before we're listening.
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", port))
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", listenPort))
 	if err != nil {
 		return nil, err
 	}
@@ -110,11 +114,11 @@ func SearchLANForHosts(port int, waitMs int) ([]HostData, error) {
 		return nil, err
 	}
 
-	conn, err := net.Dial("udp", fmt.Sprintf("255.255.255.255:%d", port))
+	conn, err := net.Dial("udp", fmt.Sprintf("255.255.255.255:%d", brodacastPort))
 	if err != nil {
 		return nil, err
 	}
-	_, err = conn.Write([]byte("ping"))
+	_, err = conn.Write([]byte(fmt.Sprintf("ping:%d", listenPort)))
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +131,7 @@ func SearchLANForHosts(port int, waitMs int) ([]HostData, error) {
 		if err != nil {
 			break
 		}
-		hosts = append(hosts, HostData{Ip: remoteAddr.String(), Name: string(msg[0:n])})
+		hosts = append(hosts, HostData{Ip: remoteAddr.IP.String(), Name: string(msg[0:n])})
 	}
 
 	return hosts, nil

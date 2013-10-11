@@ -143,6 +143,7 @@ func MakeServer(Game Game, frame_ms int, onCrash func(interface{}), logger *log.
 	s.OnCrash = onCrash
 	s.Logger = loggerOrStderr(logger)
 	s.Game = Game
+	s.Game.InitializeClientData()
 	s.initCommonChans()
 	s.initServerChans(frame_ms)
 	go s.infiniteBufferRoutine()
@@ -191,6 +192,7 @@ func MakeClient(frame_ms int, onCrash func(interface{}), logger *log.Logger, con
 	s.OnCrash = onCrash
 	s.Logger = loggerOrStderr(logger)
 	s.Game = resp.Setup.Game
+	s.Game.InitializeClientData()
 	s.id = resp.Setup.Id
 	s.initCommonChans()
 	s.initClientChans(frame_ms)

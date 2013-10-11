@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"os"
 	"runtime/debug"
 	"sync"
 	"time"
@@ -62,8 +63,12 @@ type Server struct {
 	Complete_bundles chan CompleteBundle
 	Ids_request      chan struct{}
 	Ids_response     chan []int64
-	Logger           *log.Logger
-	Errs             chan error
+
+	// Run if non-nil and the StackCatcher catches a panic.
+	OnCrash func(interface{})
+
+	Logger *log.Logger
+	Errs   chan error
 }
 
 type SetupData struct {
@@ -124,9 +129,19 @@ func (s *Server) initClientChans(frame_ms int) {
 	s.Events = make(chan Event, 10)
 }
 
-func MakeServer(Game Game, frame_ms int, logger *log.Logger, listener net.Listener) (*Server, error) {
+// If logger is not nil, returns logger, otherwise returns a *log.Logger that
+// logs to stderr.
+func loggerOrStderr(logger *log.Logger) *log.Logger {
+	if logger != nil {
+		return logger
+	}
+	return log.New(os.Stderr, "> ", log.Ltime|log.Lshortfile)
+}
+
+func MakeServer(Game Game, frame_ms int, onCrash func(interface{}), logger *log.Logger, listener net.Listener) (*Server, error) {
 	var s Server
-	s.Logger = logger
+	s.OnCrash = onCrash
+	s.Logger = loggerOrStderr(logger)
 	s.Game = Game
 	s.initCommonChans()
 	s.initServerChans(frame_ms)
@@ -155,7 +170,7 @@ func (s *Server) listenerRoutine(listener net.Listener) {
 	}
 }
 
-func MakeClient(frame_ms int, logger *log.Logger, conn net.Conn) (*Server, error) {
+func MakeClient(frame_ms int, onCrash func(interface{}), logger *log.Logger, conn net.Conn) (*Server, error) {
 	enc := gob.NewEncoder(conn)
 	dec := gob.NewDecoder(conn)
 	var resp wireData
@@ -173,7 +188,8 @@ func MakeClient(frame_ms int, logger *log.Logger, conn net.Conn) (*Server, error
 
 	var s Server
 	s.conn = conn
-	s.Logger = logger
+	s.OnCrash = onCrash
+	s.Logger = loggerOrStderr(logger)
 	s.Game = resp.Setup.Game
 	s.id = resp.Setup.Id
 	s.initCommonChans()
@@ -186,8 +202,11 @@ func MakeClient(frame_ms int, logger *log.Logger, conn net.Conn) (*Server, error
 }
 
 func (s *Server) StackCatcher() {
-	if s.Logger != nil {
-		if r := recover(); r != nil {
+	if r := recover(); r != nil {
+		if s.OnCrash != nil {
+			s.OnCrash(r)
+		}
+		if s.Logger != nil {
 			s.Logger.Printf("Panic: %v", r)
 			s.Logger.Fatalf("Stack:\n%s", debug.Stack())
 		}

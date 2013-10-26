@@ -10,6 +10,7 @@ import (
 
 type Game interface {
 	core.Game
+	SetEngine(engine *Engine)
 }
 
 type Event interface {
@@ -24,16 +25,17 @@ func (e *Engine) ApplyEvent(event Event) {
 	e.server.ApplyEvent(event)
 }
 
+// This is a Read-Lock, so multiple go-routines can all Pause() simultaneously.
 func (e *Engine) Pause() {
-	e.server.Pause.Lock()
+	e.server.Pause.RLock()
 }
 
 func (e *Engine) Unpause() {
-	e.server.Pause.Unlock()
+	e.server.Pause.RUnlock()
 }
 
 func (e *Engine) GetState() Game {
-	return e.server.Game
+	return e.server.Game.(Game)
 }
 
 // Returns the Id of this engine.  Every engine connected in a game has a unique
@@ -157,7 +159,10 @@ func NewHostEngine(game Game, frame_ms int, ip string, port int, onCrash func(in
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{server}, nil
+	engine := &Engine{server}
+	game.SetEngine(engine)
+	engine.Unpause()
+	return engine, nil
 }
 
 func NewClientEngine(frame_ms int, ip string, port int, onCrash func(interface{}), logger *log.Logger) (*Engine, error) {
@@ -169,7 +174,10 @@ func NewClientEngine(frame_ms int, ip string, port int, onCrash func(interface{}
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{server}, nil
+	engine := &Engine{server}
+	engine.GetState().(Game).SetEngine(engine)
+	engine.Unpause()
+	return engine, nil
 }
 
 func NewLocalEngine(game Game, frame_ms int, onCrash func(interface{}), logger *log.Logger) (*Engine, error) {
@@ -177,5 +185,8 @@ func NewLocalEngine(game Game, frame_ms int, onCrash func(interface{}), logger *
 	if err != nil {
 		return nil, err
 	}
-	return &Engine{server}, nil
+	engine := &Engine{server}
+	game.SetEngine(engine)
+	engine.Unpause()
+	return engine, nil
 }

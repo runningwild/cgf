@@ -26,7 +26,7 @@ type Server struct {
 	id     EngineId
 	ids    map[net.Conn]EngineId // Only used on the server
 	nextId EngineId
-	Pause  sync.Mutex
+	Pause  sync.RWMutex
 
 	// Ticks ever ms
 	Ticker <-chan time.Time
@@ -140,6 +140,10 @@ func loggerOrStderr(logger *log.Logger) *log.Logger {
 
 func MakeServer(Game Game, frame_ms int, onCrash func(interface{}), logger *log.Logger, listener net.Listener) (*Server, error) {
 	var s Server
+
+	// Lets the cgf main library do some things before any thinks happen.
+	s.Pause.RLock()
+
 	s.OnCrash = onCrash
 	s.Logger = loggerOrStderr(logger)
 	s.Game = Game
@@ -188,6 +192,10 @@ func MakeClient(frame_ms int, onCrash func(interface{}), logger *log.Logger, con
 	}
 
 	var s Server
+
+	// Lets the cgf main library do some things before any thinks happen.
+	s.Pause.RLock()
+
 	s.conn = conn
 	s.OnCrash = onCrash
 	s.Logger = loggerOrStderr(logger)

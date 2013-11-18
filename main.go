@@ -51,6 +51,10 @@ func (e *Engine) Ids() []int64 {
 	return e.server.Ids()
 }
 
+func (e *Engine) IsHost() bool {
+	return e.server.Id() == 1
+}
+
 func (e *Engine) Kill() {
 	e.server.Kill()
 }

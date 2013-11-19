@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/gob"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"os"
@@ -67,8 +68,9 @@ type Server struct {
 	// Run if non-nil and the StackCatcher catches a panic.
 	OnCrash func(interface{})
 
-	Logger *log.Logger
-	Errs   chan error
+	Logger    *log.Logger
+	Errs      chan error
+	debugFile *os.File
 }
 
 type SetupData struct {
@@ -109,6 +111,7 @@ func (s *Server) initCommonChans() {
 	s.Ids_request = make(chan struct{})
 	s.Ids_response = make(chan []int64)
 	s.KillRoutine = make(chan struct{})
+	s.debugFile, _ = os.Create("/tmp/cgf")
 }
 
 func (s *Server) initServerChans(frame_ms int) {
@@ -416,8 +419,12 @@ func (s *Server) routine() {
 		case bundles := <-s.Complete_bundles:
 			s.Pause.Lock()
 			for _, event := range bundles.Events {
+				if s.debugFile != nil {
+					fmt.Fprintf(s.debugFile, "%T: %v\n", event, event)
+				}
 				event.Apply(s.Game)
 			}
+			fmt.Fprintf(s.debugFile, "------------------------------\n")
 			s.Game.Think()
 			s.Pause.Unlock()
 

@@ -15,7 +15,7 @@ import (
 type EngineId int64
 
 type CompleteBundle struct {
-	// All of the events for the frame, in the order that they should be applied
+	// All of the events for the Frame, in the order that they should be applied
 	Events []Event
 
 	// Optional hash of the Game state.  If not nil the client will hash the Game
@@ -71,11 +71,13 @@ type Server struct {
 	Logger    *log.Logger
 	Errs      chan error
 	debugFile *os.File
+	Frame     int64
 }
 
 type SetupData struct {
-	Game Game
-	Id   EngineId
+	Game  Game
+	Id    EngineId
+	Frame int64
 }
 
 // Exactly one of the values should be non-nil
@@ -114,12 +116,12 @@ func (s *Server) initCommonChans() {
 	s.debugFile, _ = os.Create("/tmp/cgf")
 }
 
-func (s *Server) initServerChans(frame_ms int) {
+func (s *Server) initServerChans(Frame_ms int) {
 	s.ids = make(map[net.Conn]EngineId)
 	s.id = 1
 	s.ids[nil] = 1
 	s.nextId = 2
-	s.Ticker = time.Tick(time.Millisecond * time.Duration(frame_ms))
+	s.Ticker = time.Tick(time.Millisecond * time.Duration(Frame_ms))
 	s.New_conns = make(chan net.Conn, 10)
 	s.Buffer_complete_bundles = make(chan CompleteBundle)
 	s.Broadcast_complete_bundles = make(chan CompleteBundle)
@@ -128,7 +130,7 @@ func (s *Server) initServerChans(frame_ms int) {
 	s.KillBroadcast = make(chan struct{})
 }
 
-func (s *Server) initClientChans(frame_ms int) {
+func (s *Server) initClientChans(Frame_ms int) {
 	s.Events = make(chan Event, 10)
 }
 
@@ -141,7 +143,7 @@ func loggerOrStderr(logger *log.Logger) *log.Logger {
 	return log.New(os.Stderr, "> ", log.Ltime|log.Lshortfile)
 }
 
-func MakeServer(Game Game, frame_ms int, onCrash func(interface{}), logger *log.Logger, listener net.Listener) (*Server, error) {
+func MakeServer(Game Game, Frame_ms int, onCrash func(interface{}), logger *log.Logger, listener net.Listener) (*Server, error) {
 	var s Server
 
 	// Lets the cgf main library do some things before any thinks happen.
@@ -152,7 +154,7 @@ func MakeServer(Game Game, frame_ms int, onCrash func(interface{}), logger *log.
 	s.Game = Game
 	s.Game.InitializeClientData()
 	s.initCommonChans()
-	s.initServerChans(frame_ms)
+	s.initServerChans(Frame_ms)
 	go s.infiniteBufferRoutine()
 	s.listener = listener
 	if s.listener != nil {
@@ -178,7 +180,7 @@ func (s *Server) listenerRoutine(listener net.Listener) {
 	}
 }
 
-func MakeClient(frame_ms int, onCrash func(interface{}), logger *log.Logger, conn net.Conn) (*Server, error) {
+func MakeClient(Frame_ms int, onCrash func(interface{}), logger *log.Logger, conn net.Conn) (*Server, error) {
 	enc := gob.NewEncoder(conn)
 	dec := gob.NewDecoder(conn)
 	var resp wireData
@@ -204,9 +206,10 @@ func MakeClient(frame_ms int, onCrash func(interface{}), logger *log.Logger, con
 	s.Logger = loggerOrStderr(logger)
 	s.Game = resp.Setup.Game
 	s.Game.InitializeClientData()
+	s.Frame = resp.Setup.Frame
 	s.id = resp.Setup.Id
 	s.initCommonChans()
-	s.initClientChans(frame_ms)
+	s.initClientChans(Frame_ms)
 	go s.clientReadRoutine(dec)
 	go s.clientWriteRoutine(enc)
 	go s.routine()
@@ -302,7 +305,9 @@ func (s *Server) broadcastCompletedBundlesRoutine() {
 			}
 			id := s.nextId
 			s.nextId++
-			err := enc.Encode(wireData{Setup: &SetupData{Game: s.Game, Id: id}})
+			s.Pause.RLock()
+			err := enc.Encode(wireData{Setup: &SetupData{Game: s.Game, Id: id, Frame: s.Frame}})
+			s.Pause.RUnlock()
 			if s.Logger != nil {
 				s.Logger.Printf("%v", err)
 			}
@@ -418,14 +423,15 @@ func (s *Server) routine() {
 		// These cases are for all clients
 		case bundles := <-s.Complete_bundles:
 			s.Pause.Lock()
+			fmt.Fprintf(s.debugFile, "Frame %d ----------------\n", s.Frame)
 			for _, event := range bundles.Events {
 				if s.debugFile != nil {
 					fmt.Fprintf(s.debugFile, "%T: %v\n", event, event)
 				}
 				event.Apply(s.Game)
 			}
-			fmt.Fprintf(s.debugFile, "------------------------------\n")
 			s.Game.Think()
+			s.Frame++
 			s.Pause.Unlock()
 
 		// These cases are for servers only
